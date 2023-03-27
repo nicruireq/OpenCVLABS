@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+
+# Compressed files
+*.zip
+
+# pictures folder
+pictures/*
