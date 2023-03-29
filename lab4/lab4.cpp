@@ -23,7 +23,7 @@ int main(int argc, char **argv)
     }
 
     Mat image;
-    image = imread(argv[1], IMREAD_GRAYSCALE); // Read the file
+    image = imread(argv[1], IMREAD_COLOR); // Read the file
 
     if (!image.data) // Check for invalid input
     {
@@ -31,18 +31,34 @@ int main(int argc, char **argv)
         return -1;
     }
 
+    // clean lines
     Mat image2;
-    dilate(image, image2, Mat(), Point(-1,-1), 1);
+    dilate(image, image2, Mat(), Point(-1, -1), 1);
     Mat imgCleaned;
-    erode(image2, imgCleaned, Mat(), Point(-1,-1),1);
+    erode(image2, imgCleaned, Mat(), Point(-1, -1), 1);
 
-    // DRAW REGIONS
+    // draw regions
+    //Mat imgCleanedBw;
+    //threshold(imgCleaned, imgCleanedBw, 120, 255, THRESH_BINARY);
+    Point spain(52, 273);
+    Point portugal(22, 265);
+    Point germany(160, 192);
+    Point sea(68, 70);
+    Scalar loThreshold(20, 20, 20);
+    Scalar hiThreshold(20, 20, 20);
+    Scalar red(0, 0, 255), green(0,255,0), blue(255,0,0), yellow(0,255,255);
+
+    Mat filledImg = imgCleaned.clone();
+    floodFill(filledImg, spain, red, 0, loThreshold, hiThreshold); // spain
+    floodFill(filledImg, portugal, green, 0, loThreshold, hiThreshold); // portugal
+    floodFill(filledImg, germany, yellow, 0, loThreshold, hiThreshold); // germany
+    floodFill(filledImg, sea, blue, 0, loThreshold, hiThreshold); // sea
 
     // display images
     namedWindow("original", WINDOW_AUTOSIZE);
     imshow("original", image);
-    namedWindow("Closing", WINDOW_AUTOSIZE);
-    imshow("Closing", imgCleaned);
+    namedWindow("Cleaned", WINDOW_AUTOSIZE);
+    imshow("Cleaned", filledImg);
 
     waitKey(0); // Wait for a keystroke in the window
     return 0;
