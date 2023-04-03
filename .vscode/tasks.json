@@ -13,13 +13,14 @@
 				"${fileDirname}/${fileBasenameNoExtension}",
 				"-Wl,--copy-dt-needed-entries",
 				"-I",
-				"/usr/include/opencv4",
+				"/usr/include/opencv2",
 				"-L",
 				"/usr/lib",
 				"-lopencv_core",
 				"-lopencv_videoio",
 				"-lopencv_imgproc",
-				"-lopencv_highgui"
+				"-lopencv_highgui",
+				"-lopencv_objdetect"
 			],
 			"options": {
 				"cwd": "${fileDirname}"
