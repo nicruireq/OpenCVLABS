@@ -3,12 +3,15 @@
 // part of this code is stolen from Eric Yuan (http://eric-yuan.me/), who stole part from http://compvisionlab.wordpress.com/
 
 #include "opencv2/core/core.hpp"
+#include <opencv2/core/mat.hpp>
 #include "opencv2/imgproc/imgproc.hpp"
 #include "opencv2/highgui/highgui.hpp"
 #include <opencv2/ml/ml.hpp>
 #include <math.h>
 #include <iostream>
 #include <fstream>
+#include <vector>
+#include <iterator>
 
 using namespace cv;
 using namespace std;
@@ -121,6 +124,81 @@ void read_Mnist_Label(string filename, cv::Mat &labels)
     file.close();
 }
 
+// returns number of errors and hits in predicted labels vs
+// real labels, each row of matrix is a label of a pattern
+class PredResult
+{
+private:
+    vector<int> results;
+    Mat &predicted, &labels;
+    unsigned int hits_, errors_, total_;
+
+public:
+    PredResult(Mat &predicted, Mat &labels)
+        : predicted(predicted), labels(labels), hits_(0),
+          errors_(0), total_(labels.rows){};
+
+    unsigned int hits() { return hits_; }
+    unsigned int errors() { return errors_; }
+    unsigned int total() { return total_; }
+
+    // Another form to calculate hits and errors
+    // using only std functions
+    void compute()
+    {
+        int nhits = 0;
+        vector<int> pos_prediction(total_), pos_labels(total_);
+        vector<float> linePred, lineLabel;
+        size_t indexPred, indexLabel;
+        for (size_t i = 0; i < total_; i++)
+        {
+            linePred = predicted.row(i);
+            indexPred = distance(linePred.begin(), max_element(linePred.begin(), linePred.end()));
+            lineLabel = labels.row(i);
+            indexLabel = distance(lineLabel.begin(), max_element(lineLabel.begin(), lineLabel.end()));
+
+            if (indexPred == indexLabel)
+                hits_++;
+            if (indexPred != indexLabel)
+                errors_++;
+        }
+    }
+
+    void operator()()
+    {
+        // search pairs (max_val, index) for each
+        // row in predictions and labels, then compares
+        // to know if there is a hit or an error
+        // Using OpenCV function: minMaxIdx 
+        double *minVal = new double(), *maxVal = new double();
+        int *minPos = new int(), *maxPos = new int();
+        int prediction;
+        int trueLabel;
+
+        for (size_t i = 0; i < total_; i++)
+        {
+            minMaxIdx(predicted.row(i).t(), minVal, maxVal, minPos, maxPos);
+            prediction = *maxPos;
+            minMaxIdx(labels.row(i).t(), minVal, maxVal, minPos, maxPos);
+            trueLabel = *maxPos;
+            if (prediction == trueLabel)
+                hits_++;
+            if (prediction != trueLabel)
+                errors_++;
+        }
+
+        if (minVal != nullptr)
+            delete minVal;
+        if (maxVal != nullptr)
+            delete maxVal;
+        if (minPos != nullptr)
+            delete minPos;
+        if (maxPos != nullptr)
+            delete maxPos;
+    }
+};
+
+
 int main()
 {
     string filename_train_images = "train-images.idx3-ubyte";
@@ -142,7 +220,7 @@ int main()
 
     // read MNIST image into Mat
     cv::Mat mat_train_images;
-    mat_train_images.create(number_of_train_images, image_size, CV_8U);
+    mat_train_images.create(number_of_train_images, image_size, CV_32F);
     read_Mnist(filename_train_images, mat_train_images);
     cout << "N. train images: " << mat_train_images.size() << endl;
 
@@ -156,7 +234,7 @@ int main()
 
     // read MNIST image into Mat
     cv::Mat mat_test_images;
-    mat_test_images.create(number_of_images, image_size, CV_8U);
+    mat_test_images.create(number_of_images, image_size, CV_32F);
     read_Mnist(filename_images, mat_test_images);
     cout << "N. test images: " << mat_test_images.size() << endl;
 
@@ -184,40 +262,38 @@ int main()
     Ptr<TrainData> trainingData = TrainData::create(
         mat_train_images,
         SampleTypes::ROW_SAMPLE,
-        mat_train_labels
-    );
+        mat_train_labels);
     mlp->train(trainingData);
 
-    //save model
-    mlp->save("ocr_model.xml");
-
-    // Get predictions for training images
-    //mlp->predict(mat_test_images, mat_test_labels);
+    // // Get predictions for training images
+    Mat mat_predicted_train(mat_train_labels.size(), CV_32F);
+    mlp->predict(mat_train_images, mat_predicted_train);
 
     // Compute results for training images
     float percentage_hits = 0.0;
     float percentage_errors = 0.0;
-    unsigned int hits = 0;
-    unsigned int errors = 0;
-    unsigned int total = 0;
-
-    // TODO
+    PredResult train_set_res(mat_predicted_train, mat_train_labels);
+    train_set_res();
+    unsigned int hits = train_set_res.hits();
+    unsigned int errors = train_set_res.errors();
+    unsigned int total = train_set_res.total();
 
     percentage_hits = (float)hits / (float)total;
     percentage_errors = (float)errors / (float)total;
     cout << " RESULTS TRAINING: Number of samples: " << total << " hits: " << percentage_hits * 100 << " \%, errors: " << percentage_errors * 100 << "\%" << endl;
 
     // Get predictions for evaluation images
-    // TODO
+    cv::Mat mat_predicted_test(mat_test_labels.size(), CV_32F);
+    mlp->predict(mat_test_images, mat_predicted_test);
 
     // Compute results for evaluation images
     percentage_hits = 0.0;
     percentage_errors = 0.0;
-    hits = 0;
-    errors = 0;
-    total = 0;
-
-    // TODO
+    PredResult test_set_res(mat_predicted_test, mat_test_labels);
+    test_set_res();
+    hits = test_set_res.hits();
+    errors = test_set_res.errors();
+    total = test_set_res.total();
 
     percentage_hits = (float)hits / (float)total;
     percentage_errors = (float)errors / (float)total;
