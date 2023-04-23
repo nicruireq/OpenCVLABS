@@ -1,5 +1,4 @@
-// MLP code (partial) for students of the MSEEI
-// Author: Juan Pedro Bandera Rubio
+// Author: NRR
 // part of this code is stolen from Eric Yuan (http://eric-yuan.me/), who stole part from http://compvisionlab.wordpress.com/
 
 #include "opencv2/core/core.hpp"

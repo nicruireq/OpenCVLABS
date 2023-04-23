@@ -21,7 +21,8 @@
 				"-lopencv_imgproc",
 				"-lopencv_highgui",
 				"-lopencv_objdetect",
-				"-lopencv_ml"
+				"-lopencv_ml",
+				"-lopencv_dnn"
 			],
 			"options": {
 				"cwd": "${fileDirname}"
