@@ -106,6 +106,10 @@ private:
     Action noDetectAction;
     FilterType filtering;
 
+    std::mutex lock;
+    std::condition_variable cvPauseResume;
+    bool isPaused;
+
     // Comparator to sort the detected faces by area
     static bool areaComparator(const Rect &l, const Rect &r)
     {
@@ -116,7 +120,7 @@ public:
     ProcessVideo(VideoCapture &vs, FrameBuffer &buff)
         : videoStream(vs), buffer(buff), showTextInfo(false),
           storeVideo(false), noDetectAction(SHOW_MESSAGE), filtering(BLUR),
-          finished(false)
+          finished(false), isPaused(false)
     {
         if (!faceDetector.load(facedetectorData))
         {
@@ -126,9 +130,14 @@ public:
 
     void operator()()
     {
+        std::unique_lock<std::mutex> lck(lock);
+
         videoStream >> lastFrame;
         while (!lastFrame.empty())
         {
+            // pause frame processing
+            cvPauseResume.wait(lck, [this]()
+                               { return !isPaused; });
             //  Face detection
             vector<Rect> faces;
             faceDetector.detectMultiScale(lastFrame, faces, 1.1, 3, 0, Size(30, 30), Size(500, 500));
@@ -145,8 +154,7 @@ public:
             else
             {
                 // no face detected
-                cout << "FACE no detected, op = " << noDetectAction << 
-                 " ADDRESS = " << &noDetectAction << endl;
+                cout << "FACE no detected, op = " << noDetectAction << " ADDRESS = " << &noDetectAction << endl;
                 switch (noDetectAction)
                 {
                 case SHOW_MESSAGE:
@@ -173,15 +181,23 @@ public:
         buffer.deposit(lastFrame);
     }
 
-    void pause() {}
-    void resume() {}
+    void pause() { isPaused = true; }
+
+    void resume()
+    {
+        isPaused = false;
+        cvPauseResume.notify_all();
+    }
+
+    bool isVideoPaused() { return isPaused; }
+
     bool isFinished() const { return finished; }
     void setShowTextInfo(bool show) { showTextInfo = show; }
     void setStoreVideo(bool store) { storeVideo = store; }
     void changeNoDetectAction()
     {
         cout << "CHANGING ACTION METHOD, actual action: " << noDetectAction
-        << " ADDRESS = " << &noDetectAction << endl;
+             << " ADDRESS = " << &noDetectAction << endl;
         switch (noDetectAction)
         {
         case SHOW_MESSAGE:
@@ -248,7 +264,14 @@ int main(int argc, char **argv)
     while (!exit)
     {
         // cout << "BLOCKING" << endl;
-        imshow("processed", buffFrames->fetch());
+
+        // To avoid program blocking when processing
+        // is paused, else main thread will be blocked
+        // in buffFrames
+        if (!processor.isVideoPaused())
+        {
+            imshow("processed", buffFrames->fetch());
+        }
         // cout << "RELEASE" << endl;
         if (processor.isFinished())
             break;
@@ -263,6 +286,14 @@ int main(int argc, char **argv)
         case 'n':
         case 'N':
             processor.changeNoDetectAction();
+            break;
+        case 'p':
+        case 'P':
+            processor.pause();
+            break;
+        case 'r':
+        case 'R':
+            processor.resume();
             break;
         default:
             break;
