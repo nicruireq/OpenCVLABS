@@ -8,6 +8,8 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/objdetect.hpp>
+#include <opencv2/videoio.hpp>
+#include "opencv2/video/tracking.hpp"
 #include <opencv2/highgui/highgui.hpp>
 
 #include <iostream>
@@ -99,6 +101,7 @@ private:
     VideoCapture &videoStream;
     FrameBuffer &buffer;
     Mat lastFrame;
+    int framesForTracking;
     const string facedetectorData =
         "/usr/share/opencv4/haarcascades/haarcascade_frontalface_alt2.xml";
     CascadeClassifier faceDetector;
@@ -106,9 +109,13 @@ private:
     Action noDetectAction;
     FilterType filtering;
 
+    // to save the video
+    VideoWriter videoSaver;
+
     std::mutex lock;
     std::condition_variable cvPauseResume;
     bool isPaused;
+    bool isAborted;
 
     // Comparator to sort the detected faces by area
     static bool areaComparator(const Rect &l, const Rect &r)
@@ -116,15 +123,75 @@ private:
         return (l.area() < r.area());
     }
 
+    // RotatedRect track(Mat &frame, Mat& roi, Rect& track_window)
+    // {
+    //     Mat roi, hsv_roi, mask;
+
+    //     cvtColor(roi, hsv_roi, COLOR_BGR2HSV);
+    //     inRange(hsv_roi, Scalar(0, 60, 32), Scalar(180, 255, 255), mask);
+
+    //     float range_[] = {0, 180};
+    //     const float *range[] = {range_};
+    //     Mat roi_hist;
+    //     int histSize[] = {180};
+    //     int channels[] = {0};
+    //     calcHist(&hsv_roi, 1, channels, mask, roi_hist, 1, histSize, range);
+    //     normalize(roi_hist, roi_hist, 0, 255, NORM_MINMAX);
+
+    //     // Setup the termination criteria
+    //     TermCriteria term_crit(TermCriteria::EPS, 1, 1);
+
+
+    //     while (true)
+    //     {
+    //         Mat hsv, dst;
+    //         capture >> frame;
+    //         if (frame.empty())
+    //             break;
+    //         cvtColor(frame, hsv, COLOR_BGR2HSV);
+    //         calcBackProject(&hsv, 1, channels, roi_hist, dst, range);
+
+    //         // apply camshift to get the new location
+    //         RotatedRect rot_rect = CamShift(dst, track_window, term_crit);
+
+    //         // Draw it on image
+    //         Point2f points[4];
+    //         rot_rect.points(points);
+    //         for (int i = 0; i < 4; i++)
+    //             line(frame, points[i], points[(i + 1) % 4], 255, 2);
+    //         imshow("img2", frame);
+
+    //         int keyboard = waitKey(30);
+    //         if (keyboard == 'q' || keyboard == 27)
+    //             break;
+    //     }
+    // }
+
 public:
-    ProcessVideo(VideoCapture &vs, FrameBuffer &buff)
-        : videoStream(vs), buffer(buff), showTextInfo(false),
+    ProcessVideo(VideoCapture &vs, FrameBuffer &buff, int n)
+        : videoStream(vs), buffer(buff), framesForTracking(n), showTextInfo(false),
           storeVideo(false), noDetectAction(SHOW_MESSAGE), filtering(BLUR),
-          finished(false), isPaused(false)
+          finished(false), isPaused(false), isAborted(false)
     {
         if (!faceDetector.load(facedetectorData))
         {
             throw runtime_error("--(!)Error loading face detector");
+        }
+
+        videoSaver = VideoWriter("video_out.avi", VideoWriter::fourcc('M', 'J', 'P', 'G'),
+                                 videoStream.get(VideoCaptureProperties::CAP_PROP_FPS),
+                                 Size(videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_WIDTH),
+                                      videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_HEIGHT)));
+
+        if (!videoSaver.isOpened())
+        {
+            throw runtime_error("--(!)Error video_out could not be opened");
+        }
+
+        // check frames of input video
+        if (videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_COUNT) < framesForTracking)
+        {
+            throw runtime_error("--(!)Error n must be less than number of frames in the video");
         }
     }
 
@@ -133,7 +200,7 @@ public:
         std::unique_lock<std::mutex> lck(lock);
 
         videoStream >> lastFrame;
-        while (!lastFrame.empty())
+        while ((!lastFrame.empty()) && (!isAborted))
         {
             // pause frame processing
             cvPauseResume.wait(lck, [this]()
@@ -168,14 +235,23 @@ public:
                     break;
                 }
             }
+            // Stop processing when main thread is aborting
+            // doing it here too to avoid possible blocking on the buffer
+            if (isAborted)
+                return;
 
+            // save frame on video file
+            videoSaver.write(lastFrame);
             // pass new processed frame
             buffer.deposit(lastFrame);
             // get next frame to process
             videoStream >> lastFrame;
         }
-        // singal finished
+        // signal finished
         finished = true;
+        // Stop processing when main thread is aborting
+        if (isAborted)
+            return;
         // RELEASE lock at finish
         lastFrame = Mat::zeros(10, 10, CV_8U);
         buffer.deposit(lastFrame);
@@ -191,9 +267,15 @@ public:
 
     bool isVideoPaused() { return isPaused; }
 
-    bool isFinished() const { return finished; }
+    bool isProcessingFinished() const { return finished; }
+
+    // For abrupt termination
+    void abort() { isAborted = true; }
+
     void setShowTextInfo(bool show) { showTextInfo = show; }
+
     void setStoreVideo(bool store) { storeVideo = store; }
+
     void changeNoDetectAction()
     {
         cout << "CHANGING ACTION METHOD, actual action: " << noDetectAction
@@ -214,7 +296,13 @@ public:
         cout << "exiting, new action: " << noDetectAction << endl;
     }
 
-    ~ProcessVideo() {}
+    ~ProcessVideo()
+    {
+        if (videoStream.isOpened())
+            videoStream.release();
+        if (videoSaver.isOpened())
+            videoSaver.release();
+    }
 };
 
 class thread_guard
@@ -225,9 +313,10 @@ public:
     explicit thread_guard(thread &t_) : t(t_) {}
     ~thread_guard()
     {
-        // if (t.joinable())
-        //     t.join();
-        t.~thread(); // Force the thread to terminate
+        if (t.joinable())
+            t.join();
+        // t.detach();
+        // t.~thread(); // Force the thread to terminate
     }
     thread_guard(thread_guard const &) = delete;
     thread_guard &operator=(thread_guard const &) = delete;
@@ -255,7 +344,14 @@ int main(int argc, char **argv)
 
     namedWindow("processed", WINDOW_KEEPRATIO);
 
-    ProcessVideo processor(videoSource, *buffFrames);
+    ProcessVideo processor(videoSource, *buffFrames, N);
+    // important! If you don't initialize thread object
+    // wrapping the Func object passed by parameter
+    // with std::ref, thread object will do a copy
+    // of the proporties in the passed object.
+    // And it's necessary for the operation of ProcessVideo
+    // object that the object operated in the thread being
+    // the original object in order to do signaling over it
     thread threadProcessor(std::ref(processor));
     thread_guard guard(threadProcessor);
 
@@ -273,7 +369,7 @@ int main(int argc, char **argv)
             imshow("processed", buffFrames->fetch());
         }
         // cout << "RELEASE" << endl;
-        if (processor.isFinished())
+        if (processor.isProcessingFinished())
             break;
         key = (char)waitKey(5);
         switch (key)
@@ -281,6 +377,7 @@ int main(int argc, char **argv)
         case 'q':
         case 'Q':
         case 27: // escape key
+            processor.abort();
             exit = true;
             break;
         case 'n':
