@@ -123,49 +123,66 @@ private:
         return (l.area() < r.area());
     }
 
-    // RotatedRect track(Mat &frame, Mat& roi, Rect& track_window)
-    // {
-    //     Mat roi, hsv_roi, mask;
+    void writeFrame()
+    {
+        // Stop processing when main thread is aborting
+        // doing it here too to avoid possible blocking on the buffer
+        if (isAborted)
+            return;
 
-    //     cvtColor(roi, hsv_roi, COLOR_BGR2HSV);
-    //     inRange(hsv_roi, Scalar(0, 60, 32), Scalar(180, 255, 255), mask);
+        // save frame on video file
+        videoSaver.write(lastFrame);
+        // pass new processed frame
+        buffer.deposit(lastFrame);
+        // get next frame to process
+        videoStream >> lastFrame;
+    }
 
-    //     float range_[] = {0, 180};
-    //     const float *range[] = {range_};
-    //     Mat roi_hist;
-    //     int histSize[] = {180};
-    //     int channels[] = {0};
-    //     calcHist(&hsv_roi, 1, channels, mask, roi_hist, 1, histSize, range);
-    //     normalize(roi_hist, roi_hist, 0, 255, NORM_MINMAX);
+    void trackingAndFiltering(Mat &roi, Rect &track_window)
+    {
+        Mat hsv_roi, mask;
 
-    //     // Setup the termination criteria
-    //     TermCriteria term_crit(TermCriteria::EPS, 1, 1);
+        cvtColor(roi, hsv_roi, COLOR_BGR2HSV);
+        inRange(hsv_roi, Scalar(0, 60, 32), Scalar(180, 255, 255), mask);
 
+        float range_[] = {0, 180};
+        const float *range[] = {range_};
+        Mat roi_hist;
+        int histSize[] = {180};
+        int channels[] = {0};
+        calcHist(&hsv_roi, 1, channels, mask, roi_hist, 1, histSize, range);
+        normalize(roi_hist, roi_hist, 0, 255, NORM_MINMAX);
 
-    //     while (true)
-    //     {
-    //         Mat hsv, dst;
-    //         capture >> frame;
-    //         if (frame.empty())
-    //             break;
-    //         cvtColor(frame, hsv, COLOR_BGR2HSV);
-    //         calcBackProject(&hsv, 1, channels, roi_hist, dst, range);
+        // Setup the termination criteria
+        //TermCriteria term_crit(TermCriteria::EPS, 1, 1);
+        TermCriteria term_crit(TermCriteria::EPS | TermCriteria::COUNT, 10, 1);
 
-    //         // apply camshift to get the new location
-    //         RotatedRect rot_rect = CamShift(dst, track_window, term_crit);
+        for (size_t i = 0; i < framesForTracking; i++)
+        {
+            Mat hsv, dst;
+            videoStream >> lastFrame;
+            if (lastFrame.empty())
+                break;
+            cvtColor(lastFrame, hsv, COLOR_BGR2HSV);
+            calcBackProject(&hsv, 1, channels, roi_hist, dst, range);
 
-    //         // Draw it on image
-    //         Point2f points[4];
-    //         rot_rect.points(points);
-    //         for (int i = 0; i < 4; i++)
-    //             line(frame, points[i], points[(i + 1) % 4], 255, 2);
-    //         imshow("img2", frame);
+            // apply camshift to get the new location
+            RotatedRect rot_rect = CamShift(dst, track_window, term_crit);
 
-    //         int keyboard = waitKey(30);
-    //         if (keyboard == 'q' || keyboard == 27)
-    //             break;
-    //     }
-    // }
+            // Draw it on image
+            Rect contour = rot_rect.boundingRect();
+            Rect bounds(0,0,lastFrame.cols,lastFrame.rows); // frame boundaries
+            // Be sure that the tracking area is inside the boundaries of the image
+            // because boundingRect() can return negative axis that are outsise the frame borders
+            // Applying intersection with the full frame boundaries in a rect object
+            Mat faceROIMoved = lastFrame(contour & bounds);
+            // Apply filters
+            GaussianBlur(faceROIMoved, faceROIMoved, Size(23, 23), 30);
+
+            // write to video and pass to main thread to show processed frame
+            writeFrame();
+        }
+    }
 
 public:
     ProcessVideo(VideoCapture &vs, FrameBuffer &buff, int n)
@@ -216,7 +233,8 @@ public:
                     sort(faces.begin(), faces.end(), areaComparator);
                 }
                 Mat faceROI = lastFrame(faces.back());
-                GaussianBlur(faceROI, faceROI, Size(23, 23), 30);
+                // camshift and blurring
+                trackingAndFiltering(faceROI, faces.back());
             }
             else
             {
@@ -235,17 +253,8 @@ public:
                     break;
                 }
             }
-            // Stop processing when main thread is aborting
-            // doing it here too to avoid possible blocking on the buffer
-            if (isAborted)
-                return;
-
-            // save frame on video file
-            videoSaver.write(lastFrame);
-            // pass new processed frame
-            buffer.deposit(lastFrame);
-            // get next frame to process
-            videoStream >> lastFrame;
+            // may be cause a problem:
+            writeFrame();
         }
         // signal finished
         finished = true;
@@ -253,7 +262,10 @@ public:
         if (isAborted)
             return;
         // RELEASE lock at finish
-        lastFrame = Mat::zeros(10, 10, CV_8U);
+        lastFrame = Mat::zeros(
+            videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_HEIGHT),
+            videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_WIDTH),
+            CV_8U);
         buffer.deposit(lastFrame);
     }
 
