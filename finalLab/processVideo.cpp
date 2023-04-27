@@ -1,5 +1,5 @@
 /*
- * Process frames from video
+ * Blur face of major area detected in frames from video
  *
  *      Author: NRR
  */
@@ -20,9 +20,11 @@
 #include <thread>
 #include <condition_variable>
 #include <mutex>
+#include <chrono>
 
 using namespace cv;
 using namespace std;
+using namespace std::chrono;
 
 // Synchronized buffer to pass
 // processed frames between threads
@@ -93,25 +95,76 @@ enum FilterType
     BLUR
 };
 
-// void processFrame(VideoCapture &vsrc, Mat &dst, char mode);
+// To get correct font scale for a string to fit in a frame of w x h
+double fitStringInFrame(const String &text, int width, int height, int fontFace,
+                        int thickness, int desiredFontHeight, int minimumFontSize, int *finalFontHeight)
+{
+    double fontScale = getFontScaleFromHeight(fontFace, desiredFontHeight, thickness);
+    Size sz;
+    sz = getTextSize(text, fontFace, fontScale, thickness, nullptr);
+    int newFontHeight = desiredFontHeight;
+    // while result string overflow the frame in width
+    // stop if the font gets too short (8pt)
+    while ((sz.width > width) || (newFontHeight <= minimumFontSize))
+    {
+        newFontHeight -= 1;
+        fontScale = getFontScaleFromHeight(fontFace, newFontHeight, thickness);
+        sz = getTextSize(text, fontFace, fontScale, thickness, nullptr);
+    }
+
+    if (finalFontHeight != nullptr)
+    {
+        *finalFontHeight = sz.height;
+    }
+    return fontScale;
+}
 
 class ProcessVideo
 {
 private:
     VideoCapture &videoStream;
-    FrameBuffer &buffer;
-    Mat lastFrame;
+    FrameBuffer &buffer; // to pass processed frames to main thread
+    Mat lastFrame;       // frame being processed
+
+    // tracking and detection
     int framesForTracking;
     const string facedetectorData =
         "/usr/share/opencv4/haarcascades/haarcascade_frontalface_alt2.xml";
     CascadeClassifier faceDetector;
+    // signaling
     bool showTextInfo, storeVideo, finished;
     Action noDetectAction;
-    FilterType filtering;
+
+    // to control level of blurring
+    static constexpr float MIN_BLURR_LEVEL = 0.5;
+    static constexpr float MAX_BLURR_LEVEL = 30.0;
+    static constexpr float BLURR_STEP = 0.5;
+    float blurrLevel;
+
+    // to do measurements
+    high_resolution_clock::time_point timePre, timePost;
+    int preFrameCount, postFrameCount; // instantaneous frames number
+    int framesCounter;                 // full frames counter
+    struct Measure
+    {
+        int frameNumber, faces;
+        double processingTimeSeconds;
+
+        Measure(int fn, int fc, double t)
+            : frameNumber(fn), faces(fc),
+              processingTimeSeconds(t) {}
+
+        Measure()
+            : frameNumber(0), faces(0),
+              processingTimeSeconds(0.0) {}
+    };
+    vector<Measure> measures;
+    bool isShowingInfo;
 
     // to save the video
     VideoWriter videoSaver;
 
+    // for concurrency management
     std::mutex lock;
     std::condition_variable cvPauseResume;
     bool isPaused;
@@ -138,7 +191,35 @@ private:
         videoStream >> lastFrame;
     }
 
-    void trackingAndFiltering(Mat &roi, Rect &track_window)
+    void paintInfoOnFrame()
+    {
+        if (isShowingInfo)
+        {
+            double totalTime = 0.0, fps;
+            for (size_t i = 0; i < framesCounter; i++)
+            {
+                totalTime += measures[i].processingTimeSeconds;
+            }
+            fps = framesCounter / totalTime;
+
+            // painting
+            string info = cv::format("Frame: %d | Frame rate: %.3f fps | Faces: %d",
+                                     measures[framesCounter].frameNumber,
+                                     fps,
+                                     measures[framesCounter].faces);
+            // put origin at the bottom-left corner
+            int w = videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_WIDTH);
+            int h = videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_HEIGHT);
+            Point origin(w * 0.02, h - h * 0.02);
+            int font = FONT_HERSHEY_SIMPLEX;
+            int thickness = 2;
+            // double fontScale = getFontScaleFromHeight(font, 18, thickness);
+            double fontScale = fitStringInFrame(info, w, h, font, thickness, 18, 8, nullptr);
+            putText(lastFrame, info, origin, font, fontScale, Scalar(0, 0, 255), thickness);
+        }
+    }
+
+    void trackingAndFiltering(Mat &roi, Rect &track_window, int facesInFrame)
     {
         Mat hsv_roi, mask;
 
@@ -154,15 +235,30 @@ private:
         normalize(roi_hist, roi_hist, 0, 255, NORM_MINMAX);
 
         // Setup the termination criteria
-        //TermCriteria term_crit(TermCriteria::EPS, 1, 1);
+        // TermCriteria term_crit(TermCriteria::EPS, 1, 1);
         TermCriteria term_crit(TermCriteria::EPS | TermCriteria::COUNT, 10, 1);
 
         for (size_t i = 0; i < framesForTracking; i++)
         {
             Mat hsv, dst;
-            videoStream >> lastFrame;
-            if (lastFrame.empty())
-                break;
+
+            // measurements for first frame comming from operator()
+            if (i == 0)
+            {
+                // possible refactoring of this chunk of code
+                timePost = high_resolution_clock::now();
+                duration<double> time_span = duration_cast<duration<double>>(timePost - timePre);
+                framesCounter++;
+                measures[framesCounter] = Measure(framesCounter, facesInFrame, time_span.count());
+                paintInfoOnFrame(); // update info and show
+            }
+            else
+            {
+                // begin to count time for frames being processed by camshift algorithm
+                timePre = high_resolution_clock::now();
+            }
+
+            // first process thr frame comming from operator()
             cvtColor(lastFrame, hsv, COLOR_BGR2HSV);
             calcBackProject(&hsv, 1, channels, roi_hist, dst, range);
 
@@ -171,24 +267,39 @@ private:
 
             // Draw it on image
             Rect contour = rot_rect.boundingRect();
-            Rect bounds(0,0,lastFrame.cols,lastFrame.rows); // frame boundaries
+            Rect bounds(0, 0, lastFrame.cols, lastFrame.rows); // frame boundaries
             // Be sure that the tracking area is inside the boundaries of the image
             // because boundingRect() can return negative axis that are outsise the frame borders
             // Applying intersection with the full frame boundaries in a rect object
             Mat faceROIMoved = lastFrame(contour & bounds);
             // Apply filters
-            GaussianBlur(faceROIMoved, faceROIMoved, Size(23, 23), 30);
+            // intensity of blurring is controlled by the blurrLevel property
+            GaussianBlur(faceROIMoved, faceROIMoved, Size(23, 23), blurrLevel, blurrLevel);
+
+            // Measurement
+            // possible refactoring of this chunk of code
+            timePost = high_resolution_clock::now();
+            duration<double> time_span = duration_cast<duration<double>>(timePost - timePre);
+            framesCounter++; // count processed frame
+            measures[framesCounter] = Measure(framesCounter, facesInFrame, time_span.count());
+            paintInfoOnFrame(); // update info and show
 
             // write to video and pass to main thread to show processed frame
             writeFrame();
+
+            // grab next frame
+            videoStream >> lastFrame;
+            if (lastFrame.empty())
+                break;
         }
     }
 
 public:
     ProcessVideo(VideoCapture &vs, FrameBuffer &buff, int n)
         : videoStream(vs), buffer(buff), framesForTracking(n), showTextInfo(false),
-          storeVideo(false), noDetectAction(SHOW_MESSAGE), filtering(BLUR),
-          finished(false), isPaused(false), isAborted(false)
+          storeVideo(false), noDetectAction(SHOW_MESSAGE), isShowingInfo(false),
+          finished(false), isPaused(false), isAborted(false),
+          blurrLevel(ProcessVideo::MIN_BLURR_LEVEL), framesCounter(0)
     {
         if (!faceDetector.load(facedetectorData))
         {
@@ -210,6 +321,9 @@ public:
         {
             throw runtime_error("--(!)Error n must be less than number of frames in the video");
         }
+
+        // initialize vector with measures (frame_number, faces_detected, processing_time)
+        measures = vector<Measure>(videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_COUNT));
     }
 
     void operator()()
@@ -217,11 +331,16 @@ public:
         std::unique_lock<std::mutex> lck(lock);
 
         videoStream >> lastFrame;
+
         while ((!lastFrame.empty()) && (!isAborted))
         {
             // pause frame processing
             cvPauseResume.wait(lck, [this]()
                                { return !isPaused; });
+
+            // grab instant before processing
+            timePre = high_resolution_clock::now();
+
             //  Face detection
             vector<Rect> faces;
             faceDetector.detectMultiScale(lastFrame, faces, 1.1, 3, 0, Size(30, 30), Size(500, 500));
@@ -234,17 +353,26 @@ public:
                 }
                 Mat faceROI = lastFrame(faces.back());
                 // camshift and blurring
-                trackingAndFiltering(faceROI, faces.back());
+                trackingAndFiltering(faceROI, faces.back(), faces.size());
             }
             else
             {
-                // no face detected
-                cout << "FACE no detected, op = " << noDetectAction << " ADDRESS = " << &noDetectAction << endl;
+                // Configure params to fit text and show it later
+                int w = videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_WIDTH);
+                int h = videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_HEIGHT);
+                int font = FONT_HERSHEY_SIMPLEX;
+                int thickness = 1;
+                string warning = "ATENCION: Ningun rostro detectado";
+                int fontHeight;
+                double fontScale = fitStringInFrame(warning, w, h, font, thickness, 18, 2, &fontHeight);
+                Point origin(w * 0.02, fontHeight);
+
                 switch (noDetectAction)
                 {
                 case SHOW_MESSAGE:
-                    putText(lastFrame, "ATENCION: Ningun rostro detectado",
-                            Point(10, 40), FONT_HERSHEY_SIMPLEX, 1.1, Scalar(0, 255, 0), 4);
+
+                    putText(lastFrame, warning, origin, font, fontScale,
+                            Scalar(0, 255, 0), thickness);
                     break;
                 case BLUR_ALL:
                     GaussianBlur(lastFrame, lastFrame, Size(31, 31), 50, 2);
@@ -252,7 +380,15 @@ public:
                 case NO_ACTION:
                     break;
                 }
+                // Measurement
+                // possible refactoring of this chunk of code
+                timePost = high_resolution_clock::now();
+                duration<double> time_span = duration_cast<duration<double>>(timePost - timePre);
+                framesCounter++; // count processed frame
+                measures[framesCounter] = Measure(framesCounter, 0, time_span.count());
+                paintInfoOnFrame(); // update info and show
             }
+
             // may be cause a problem:
             writeFrame();
         }
@@ -267,6 +403,32 @@ public:
             videoStream.get(VideoCaptureProperties::CAP_PROP_FRAME_WIDTH),
             CV_8U);
         buffer.deposit(lastFrame);
+    }
+
+    void showInfo()
+    {
+        if (isShowingInfo)
+            isShowingInfo = false;
+        else
+            isShowingInfo = true;
+    }
+
+    void increaseBlurrLevel()
+    {
+        float sd = blurrLevel + ProcessVideo::BLURR_STEP;
+        blurrLevel = (sd > ProcessVideo::MAX_BLURR_LEVEL)
+                         ? ProcessVideo::MAX_BLURR_LEVEL
+                         : sd;
+        cout << "(+) BLURR : " << blurrLevel << endl;
+    }
+
+    void decreaseBlurrLevel()
+    {
+        float sd = blurrLevel - ProcessVideo::BLURR_STEP;
+        blurrLevel = (sd < ProcessVideo::MIN_BLURR_LEVEL)
+                         ? ProcessVideo::MIN_BLURR_LEVEL
+                         : sd;
+        cout << "(-) BLURR : " << blurrLevel << endl;
     }
 
     void pause() { isPaused = true; }
@@ -290,8 +452,6 @@ public:
 
     void changeNoDetectAction()
     {
-        cout << "CHANGING ACTION METHOD, actual action: " << noDetectAction
-             << " ADDRESS = " << &noDetectAction << endl;
         switch (noDetectAction)
         {
         case SHOW_MESSAGE:
@@ -305,7 +465,6 @@ public:
         default:
             break;
         }
-        cout << "exiting, new action: " << noDetectAction << endl;
     }
 
     ~ProcessVideo()
@@ -403,6 +562,18 @@ int main(int argc, char **argv)
         case 'r':
         case 'R':
             processor.resume();
+            break;
+        case 'u':
+        case 'U':
+            processor.increaseBlurrLevel();
+            break;
+        case 'd':
+        case 'D':
+            processor.decreaseBlurrLevel();
+            break;
+        case 's':
+        case 'S':
+            processor.showInfo();
             break;
         default:
             break;
