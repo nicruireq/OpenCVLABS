@@ -188,7 +188,7 @@ private:
         // pass new processed frame
         buffer.deposit(lastFrame);
         // get next frame to process
-        videoStream >> lastFrame;
+        // videoStream >> lastFrame;
     }
 
     void paintInfoOnFrame()
@@ -258,7 +258,7 @@ private:
                 timePre = high_resolution_clock::now();
             }
 
-            // first process thr frame comming from operator()
+            // first process the frame comming from operator()
             cvtColor(lastFrame, hsv, COLOR_BGR2HSV);
             calcBackProject(&hsv, 1, channels, roi_hist, dst, range);
 
@@ -299,7 +299,7 @@ public:
         : videoStream(vs), buffer(buff), framesForTracking(n), showTextInfo(false),
           storeVideo(false), noDetectAction(SHOW_MESSAGE), isShowingInfo(false),
           finished(false), isPaused(false), isAborted(false),
-          blurrLevel(ProcessVideo::MIN_BLURR_LEVEL), framesCounter(0)
+          blurrLevel(ProcessVideo::MAX_BLURR_LEVEL), framesCounter(0)
     {
         if (!faceDetector.load(facedetectorData))
         {
@@ -391,6 +391,10 @@ public:
 
             // may be cause a problem:
             writeFrame();
+            // grab next frame
+            videoStream >> lastFrame;
+            if (lastFrame.empty())
+                break;
         }
         // signal finished
         finished = true;
@@ -495,11 +499,26 @@ public:
 
 int main(int argc, char **argv)
 {
+
+    string help = "Options selection keys:\n"
+                  "========================"
+                  " Q or q: exit\n"
+                  " N or n: each pushing on it changes between the actions to take when there is no face detected in a frame (do nothing, full frame blurring or show message)\n"
+                  " P or p: pause the frames processing\n"
+                  " R or r: resume the frames processing\n"
+                  " U or u: increase blurring level\n"
+                  " D or d: decrease blurring level\n"
+                  " S or s: push it to show or hide the processing info in frames\n\n"
+                  "The name of the output video file is: video_out.avi\n";
+
     if (argc != 3)
     {
         cout << " Usage: opencv_basico N VideoToLoadAndDisplay" << endl;
         return -1;
     }
+
+    // Print help always
+    cout << help << endl;
 
     int N = std::atoi(argv[1]);
 
@@ -519,18 +538,17 @@ int main(int argc, char **argv)
     // important! If you don't initialize thread object
     // wrapping the Func object passed by parameter
     // with std::ref, thread object will do a copy
-    // of the proporties in the passed object.
+    // of the properties in the passed object.
     // And it's necessary for the operation of ProcessVideo
-    // object that the object operated in the thread being
+    // object that the object operated in the thread to be
     // the original object in order to do signaling over it
     thread threadProcessor(std::ref(processor));
     thread_guard guard(threadProcessor);
 
-    char key = '3'; // to set default mode NORMAL
+    char key;
     bool exit = false;
     while (!exit)
     {
-        // cout << "BLOCKING" << endl;
 
         // To avoid program blocking when processing
         // is paused, else main thread will be blocked
@@ -539,7 +557,7 @@ int main(int argc, char **argv)
         {
             imshow("processed", buffFrames->fetch());
         }
-        // cout << "RELEASE" << endl;
+
         if (processor.isProcessingFinished())
             break;
         key = (char)waitKey(5);
@@ -580,36 +598,6 @@ int main(int argc, char **argv)
         }
     }
 
-    // Mat frame;
-    // char key = '3';    // to set default mode NORMAL
-    // int mode = NORMAL; // default mode
-    // for (;;)
-    // {
-    //     processFrame(videoSource, frame, mode);
-    //     if (frame.empty())
-    //         break;
-    //     imshow("Original", frame);
-    //     key = (char)waitKey(5);
-    //     switch (key)
-    //     {
-    //     case 'q':
-    //     case 'Q':
-    //     case 27: // escape key
-    //         return 0;
-    //     case '1':
-    //         mode = GRAY;
-    //         break;
-    //     case '2':
-    //         mode = BINARIZE;
-    //         break;
-    //     case '3':
-    //         mode = NORMAL;
-    //         break;
-    //     default:
-    //         break;
-    //     }
-    // }
-
     // Clean
     if (buffFrames != nullptr)
     {
@@ -619,23 +607,3 @@ int main(int argc, char **argv)
 
     return 0;
 }
-
-// void processFrame(VideoCapture &videoSource, Mat &dst, char mode)
-// {
-//     Mat frame;
-//     videoSource >> frame;
-//     switch (mode)
-//     {
-//     case GRAY:
-//         cvtColor(frame, dst, COLOR_BGR2GRAY);
-//         break;
-//     case BINARIZE:
-//         cvtColor(frame, dst, COLOR_BGR2GRAY);
-//         threshold(dst, dst, 100, 255, THRESH_BINARY);
-//         break;
-//     case NORMAL:
-//     default:
-//         dst = frame.clone();
-//         break;
-//     }
-// }
